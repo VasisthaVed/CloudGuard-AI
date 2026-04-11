@@ -1,0 +1,6 @@
+boto3
+anthropic
+rich
+openai
+python-dotenv
+pytest
