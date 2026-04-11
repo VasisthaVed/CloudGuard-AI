@@ -77,13 +77,28 @@ def generate_report(findings, filename="cloudguard_report.json"):
             
         if advice and not advice.startswith("Failed ") and not advice.startswith("Skipped "):
             md = Markdown(advice)
+            
+            # If AI Comparison was on, add the meta info
+            judge_info = finding.get("judge_info")
+            if judge_info:
+                title = (
+                    f"[cyan]AI Explanation & Fix:[/cyan] [bold]{finding.get('resource_name')}[/bold]\n"
+                    f"[magenta][Best Model][/magenta] {judge_info.get('winning_model')}   "
+                    f"[magenta][Confidence][/magenta] {judge_info.get('confidence_score')}"
+                )
+            else:
+                title = f"[cyan]AI Explanation & Fix:[/cyan] [bold]{finding.get('resource_name')}[/bold]"
+
             preview_panel = Panel(
                 md, 
-                title=f"[cyan]AI Explanation & Fix:[/cyan] [bold]{finding.get('resource_name')}[/bold]", 
+                title=title, 
                 border_style="green",
                 padding=(1, 2)
             )
             console.print(preview_panel)
+            if judge_info:
+                console.print(f"       [dim]Judge Reasoning: {judge_info.get('reasoning')}[/dim]")
+                
             console.print("[dim]... (View cloudguard_report*.json for all findings) ...[/dim]\n")
             break
 
