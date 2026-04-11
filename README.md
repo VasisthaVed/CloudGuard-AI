@@ -125,6 +125,11 @@ Overall Risk Score: 32
 
 Scan complete. Report saved to cloudguard_report_20260411_141320.json
 ```
+## Screenshot 
+<img width="1036" height="747" alt="image" src="https://github.com/user-attachments/assets/8b9c1afa-54ec-4c2e-a0ba-b989e684ef26" />
+<img width="1027" height="703" alt="image" src="https://github.com/user-attachments/assets/b0d99836-249d-498f-96d5-43c44c1b0710" />
+
+
 
 ## Project Structure
 
@@ -144,6 +149,7 @@ CloudGuard_ai/
   README.md            This file
   GUIDE.md             Personal walkthrough for understanding the code
 ```
+
 
 ## Testing
 
