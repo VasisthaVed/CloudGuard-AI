@@ -3,7 +3,16 @@
 
 # === Generated output ===
 cloudguard_report*.json
+cloudguard_report*.html
+cloudguard_remediate*.sh
+cloudguard_audit.log
 *.json
+*.log
+*.sh
+*.html
+
+# === Build / Docs ===
+blueprint_text.txt
 
 # === Python ===
 __pycache__/

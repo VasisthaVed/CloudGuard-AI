@@ -1,45 +1,55 @@
-# CloudGuard AI - Bugs & Improvements Log
+# CloudGuard AI v2.0 — Engineering Audit Log
 
-This document tracks identified bugs, edge cases, and proposed architectural improvements for Version 3 and beyond. This is intended for review by an advanced model (like Claude 3.5 Opus) for future development.
+**Last Updated:** 2026-05-07
+**Status:** ✅ All critical issues resolved. v2.0 is production-ready.
 
-## 🐛 Identified Bugs & Edge Cases
+---
 
-### 1. AI Judge JSON Parsing
-- **Issue**: `ai_advisor.py` uses `json.loads(raw_judge_output)` assuming the LLM returns pure JSON.
-- **Risk**: Some models might include conversational text before/after the JSON or wrap it in ```json blocks, causing a crash.
-- **Fix**: Use a regex or a cleaning function to extract the JSON content from the raw string.
+## ✅ Resolved Bugs & Spec Violations
 
-### 2. AWS Pagination (Scalability)
-- **Issue**: `scanner.py` calls `describe_security_groups()` once without a paginator.
-- **Risk**: In extremely large AWS accounts (1000+ security groups), the scanner will only see the first page of results.
-- **Fix**: Switch to using the Boto3 `get_paginator('describe_security_groups')` method.
+| ID | File | Issue | Status |
+| :--- | :--- | :--- | :--- |
+| **BUG-01** | `ai_advisor.py` | Comparison mode crashed with `NameError: _call_openrouter` | ✅ Fixed — uses `LiteLLMAdapter` |
+| **BUG-02** | `chat_mode.py` | `Rule` imported at bottom of file, causing `NameError` | ✅ Fixed — moved to top |
+| **BUG-03** | `chat_mode.py` | Hardcoded `litellm.completion()` bypassed Adapter Pattern | ✅ Fixed — uses `provider.chat()` |
+| **BUG-04** | `scanner.py` | Mock findings missing `region` key | ✅ Fixed — all mock dicts have `region` |
+| **SPEC-01** | `autofix.py` | Processed Medium/Low findings (blueprint: Critical/High only) | ✅ Fixed — severity filter added |
+| **SPEC-03** | `ai_advisor.py` | Stale docstring listing only `openrouter`/`anthropic` | ✅ Fixed — updated to v2.0 architecture |
+| **SPEC-04** | `main.py`, `report.py` | Version string `1.1.0` → `2.0.0` | ✅ Fixed |
+| **SPEC-05** | `adapters/__init__.py` | Missing `auto` detection mode | ✅ Fixed — checks keys in priority order |
+| **SPEC-06** | `adapters/__init__.py` | `openrouter` alias removed, breaking v1 users | ✅ Fixed — alias routes to LiteLLMAdapter |
+| **QUAL-01** | `chat_mode.py` | Generic `Exception` → `break` killed chat on API timeout | ✅ Fixed — uses `continue` |
+| **QUAL-02** | `autofix.py` | `shell=True` with no command guard | ✅ Fixed — must start with `aws `, logged to audit file |
+| **QUAL-04** | `scanner.py` | Bare `except:` in IAM last-used check | ✅ Fixed — `except Exception:` |
+| **QUAL-05** | `scanner.py` | `import csv` / `import io` inside function body | ✅ Fixed — moved to module top |
+| **QUAL-06** | `ai_advisor.py` | Unbounded `ThreadPoolExecutor(max_workers=len(models))` | ✅ Fixed — capped at 5 |
+| **IMP-01** | `tests/` | No unit tests for new v2.0 code | ✅ Fixed — 35 tests, all passing |
+| **IMP-03** | `report.py` | Version hardcoded as `1.1.0` | ✅ Fixed — `2.0.0` |
+| **IMP-05** | `chat_mode.py` | Comparison mode ran models sequentially | ✅ Fixed — parallel via `ThreadPoolExecutor` |
+| **IMP-02** | `autofix.py` | Add `--export-fix` flag for script export (`remediate.sh`) alongside interactive `--fix` | ✅ Fixed |
+| **NEW-01** | `html_report.py` | Web dashboard for findings visualisation | ✅ Fixed — Cyber-Slate HTML report generated |
+| **NEW-02** | `autofix.py` | `remediate.sh` export with `set -e` and per-block prompts | ✅ Fixed — exported via `--export-fix` |
 
-### 3. Limited IAM Detection
-- **Issue**: `scan_iam` only checks for `AdministratorAccess` attached **directly** to a user.
-- **Risk**: It misses users who have admin rights via **IAM Groups** or **Inline Policies**.
-- **Fix**: Enhance the scanner to check `list_groups_for_user`, `list_user_policies` (inline), and group-attached policies.
+---
 
-### 4. OpenRouter JSON Mode
-- **Issue**: Version 2 forces `response_format={"type": "json_object"}`.
-- **Risk**: Older or smaller free models on OpenRouter may not support this parameter and return a `400 Bad Request`.
-- **Fix**: Add a check or a fallback that tries the call without the JSON format parameter if it fails once.
+## ✅ Pre-existing Bugs Fixed in v2.0
 
-## 🚀 Proposed Improvements (v3 Roadmap)
+| Bug | Status |
+| :--- | :--- |
+| **AI Judge JSON Parsing** | ✅ `_extract_json()` with fence stripping + brace-depth counting |
+| **AWS Pagination** | ✅ Paginator used in `describe_security_groups` |
+| **Limited IAM Detection** | ✅ Group policies + inline policies now checked |
+| **Multi-Region Scanning** | ✅ `scan_all_regions()` orchestrator |
+| **IP Redaction** | ✅ `_sanitise_network()` with IPv4/IPv6 regex |
+| **Pinned Dependencies** | ✅ `litellm==1.83.14` in `requirements.txt` |
 
-### 1. Robust Sanitisation
-- **Current**: Redacts standard 12-digit Account IDs and ARNs using regex.
-- **Improvement**: Add redaction for IPv4/IPv6 addresses (except 0.0.0.0/0) to further protect network topology data before sending to LLMs.
+---
 
-### 2. Detailed JSON Metadata
-- **Current**: JSON report contains the findings but lacks the summary metrics.
-- **Improvement**: Add an `audit_metadata` section to the JSON including `overall_risk_score`, `severity_counts`, and `duration_seconds`.
+## 🟢 Open Improvements (v2.x Roadmap)
 
-### 3. "Self-Correction" Logic
-- **Improvement**: If the Judge AI detects that all models provided low-quality or conflicting advice, it should be able to trigger a more powerful (paid) model like GPT-4o or Claude 3.5 Sonnet as a final tie-breaker.
-
-### 4. Pinned Dependencies
-- **Improvement**: Update `requirements.txt` to use exact versions (e.g., `boto3==1.34.0`) to ensure the tool doesn't break when library updates are released.
-
-### 5. Multi-Region Scanning
-- **Current**: Scans the default region configured in the environment.
-- **Improvement**: Add a loop in `main.py` that queries `ec2.describe_regions()` and runs the scanner across every active AWS region.
+| ID | Description | Priority |
+| :--- | :--- | :--- |
+| **IMP-04** | Update `.env.example` with newer variable comments | Low |
+| **IMP-06** | Rotate `cloudguard_audit.log` (currently appends forever) | Low |
+| **QUAL-03** | IPv6 regex too narrow — misses compressed forms like `::1`, `fe80::1` | Low |
+| **NEW** | Slack/email alert integration for scheduled scans | Future |

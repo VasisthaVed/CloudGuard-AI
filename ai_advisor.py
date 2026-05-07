@@ -3,8 +3,10 @@ ai_advisor.py -- Sends each finding to an AI model for plain-English
                   remediation advice.
 
 Supported providers (set AI_PROVIDER in .env):
-  - "openrouter"  - default, uses the OpenAI-compatible API at openrouter.ai
-  - "anthropic"   - uses the Anthropic Python SDK (claude-3-haiku)
+  - "litellm"     - default, uses LiteLLM to support 100+ providers
+  - "auto"        - automatically picks the first available API key
+  - "custom"      - uses your private enterprise endpoint
+  - Native SDKs   - "anthropic", "openai", "gemini", "ollama", "xai", "deepseek"
 
 Data safety:
   Before any finding is sent to a third-party API we strip it down to only
@@ -20,6 +22,7 @@ import time
 
 from rich.console import Console
 from rich.panel import Panel
+from adapters import get_provider
 
 console = Console()
 
@@ -59,86 +62,108 @@ JUDGE_PROMPT = (
 )
 
 
+# -- JSON extraction helper (Bug #1 fix) --------------------------------
+def _extract_json(raw: str) -> dict:
+    """
+    Robustly extract a JSON object from raw LLM output.
+    Handles:
+      - Pure JSON strings
+      - JSON wrapped in ```json ... ``` markdown fences
+      - JSON buried inside conversational text
+    Returns parsed dict, or a safe fallback on failure.
+    """
+    if not raw or not raw.strip():
+        return {
+            "winning_model": "Unknown (empty response)",
+            "confidence_score": "Unknown",
+            "reasoning": "Judge AI returned an empty response.",
+            "best_advice": "No advice available.",
+        }
+
+    text = raw.strip()
+
+    # Step 1: Strip markdown code fences (```json ... ``` or ``` ... ```)
+    fence_pattern = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
+    fence_match = fence_pattern.search(text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Step 2: Try direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Step 3: Find the first { ... } block using brace-depth counting
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except (json.JSONDecodeError, ValueError):
+                        break
+
+    # Step 4: Fallback — return the raw text as advice
+    return {
+        "winning_model": "Unknown (parse error)",
+        "confidence_score": "Unknown",
+        "reasoning": "Judge AI output could not be parsed as JSON.",
+        "best_advice": raw.strip(),
+    }
+
+
 # -- Data sanitisation --------------------------------------------------
+def _sanitise_network(text: str) -> str:
+    """
+    Replace IPv4 and IPv6 addresses with redaction tags.
+    Matches CIDR notation as well (e.g., 0.0.0.0/0).
+    """
+    if not isinstance(text, str):
+        return text
+
+    # IPv4 regex (handles 0.0.0.0/0, 192.168.1.1, etc.)
+    ipv4_pattern = r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b"
+    text = re.sub(ipv4_pattern, "<IPv4_REDACTED>", text)
+
+    # IPv6 regex (basic support for standard hex notation)
+    ipv6_pattern = r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}(?:/\d{1,3})?\b"
+    text = re.sub(ipv6_pattern, "<IPv6_REDACTED>", text)
+
+    return text
+
+
 def _sanitise_finding(finding: dict) -> dict:
     """
     Return a COPY of the finding with sensitive info scrubbed so we never
-    leak real AWS account IDs, ARNs, or bucket names to a third-party API.
+    leak real AWS account IDs, ARNs, or IP addresses to a third-party API.
     """
     safe = {
         "service":  finding.get("service", "Unknown"),
         "issue":    finding.get("issue", "Unknown"),
         "severity": finding.get("severity", "Unknown"),
-        "details":  finding.get("details", ""),
+        "details":  _sanitise_network(finding.get("details", "")),
     }
 
     # Keep resource_name but mask sensitive patterns
     resource = finding.get("resource_name", "Unknown")
     resource = re.sub(r"\b\d{12}\b", "XXXXXXXXXXXX", resource)
     resource = re.sub(r"arn:aws:[^\"'\s]+", "arn:aws:***REDACTED***", resource)
-    safe["resource_name"] = resource
+    safe["resource_name"] = _sanitise_network(resource)
 
     return safe
 
 
-# -- Provider helpers ---------------------------------------------------
-def _call_anthropic(prompt: str) -> str:
-    """Call Anthropic Claude API (lazy import)."""
-    from anthropic import Anthropic
-
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set. Add it to your .env file.")
-
-    client = Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model="claude-3-haiku-20240307",
-        max_tokens=200,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
+# Redundant provider helpers removed in favor of Adapter Pattern.
 
 
-def _call_openrouter(prompt: str, model: str = None) -> str:
-    """Call OpenRouter API (OpenAI-compatible, supports many free models)."""
-    from openai import OpenAI
-
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "OPENROUTER_API_KEY not set. "
-            "Get a free key at https://openrouter.ai and add it to .env"
-        )
-
-    if model is None:
-        model = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
-
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=api_key,
-    )
-    
-    # We use dynamic system prompts based on if it's the Judge or standard
-    sys_prompt = JUDGE_PROMPT if "You are an AI Judge" in prompt else SYSTEM_PROMPT
-    
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=600 if sys_prompt == JUDGE_PROMPT else 400,
-        response_format={"type": "json_object"} if sys_prompt == JUDGE_PROMPT else None,
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    return response.choices[0].message.content
-
-
-# -- Provider registry --------------------------------------------------
-_PROVIDERS = {
-    "anthropic":  _call_anthropic,
-    "openrouter": _call_openrouter,
-}
+# Registry moved to get_provider factory.
 
 
 # -- Comparison Mode Workers --------------------------------------------
@@ -158,10 +183,11 @@ def _compare_all_models(finding: dict, prompt: str) -> dict:
     results = {}
     
     # Run API calls in parallel to bypass long sequential wait times!
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(models), 5)) as executor:
+        from adapters.litellm_adapter import LiteLLMAdapter
         # map future to model name
         future_to_model = {
-            executor.submit(_call_openrouter, prompt, model): model 
+            executor.submit(LiteLLMAdapter(model_override=model).complete, prompt, SYSTEM_PROMPT): model 
             for model in models
         }
         
@@ -179,83 +205,50 @@ def _run_judge_ai(finding_safe: dict, advice_results: dict) -> dict:
     """
     Passes the results of all models to the Judge AI to pick the winner.
     """
-    judge_model = os.getenv("JUDGE_MODEL", "google/gemma-3-27b-it:free")
+    # Use the configured provider for judging
+    judge_provider = get_provider()
     
     prompt = (
-        f"You are an AI Judge. Here is the finding:\n{json.dumps(finding_safe, indent=2)}\n\n"
+        f"Here is the finding:\n{json.dumps(finding_safe, indent=2)}\n\n"
         "Here are the proposed remediation plans from different AI models:\n"
     )
     
     for model, advice in advice_results.items():
         prompt += f"--- MODEL: {model} ---\n{advice}\n\n"
         
-    # The _call_openrouter logic intercepts the "You are an AI Judge" and forces JSON output
-    raw_judge_output = _call_openrouter(prompt, model=judge_model)
-    
-    try:
-        data = json.loads(raw_judge_output)
-        return data
-    except Exception as e:
-        # Fallback if Judge failed to format json
-        return {
-            "winning_model": "Unknown (JSON Error)",
-            "confidence_score": "Unknown",
-            "reasoning": "Judge AI failed to format JSON",
-            "best_advice": raw_judge_output
-        }
+    raw_judge_output = judge_provider.complete(prompt, system_prompt=JUDGE_PROMPT, max_tokens=600)
+    return _extract_json(raw_judge_output)
 
 
 # -- Public API ---------------------------------------------------------
 def get_ai_advice(findings_list: list) -> list:
     """
     For each finding dict, call the configured AI provider and append an
-    'ai_advice' key with the response.  Returns the mutated list.
-
-    Provider is selected by the AI_PROVIDER env var (default: openrouter).
+    'ai_advice' key with the response. Returns the mutated list.
     """
     if not findings_list:
         console.print("[bold yellow]No findings to send to AI Advisor.[/bold yellow]")
         return findings_list
 
-    provider = os.getenv("AI_PROVIDER", "openrouter").lower().strip()
-    comparison_mode = os.getenv("COMPARISON_MODE", "false").lower() == "true"
-
-    if comparison_mode and provider != "openrouter":
-        console.print("[bold red]Comparison mode only supports 'openrouter' provider. Disabling.[/bold red]")
-        comparison_mode = False
-
-    call_fn = _PROVIDERS.get(provider)
-    if call_fn is None:
-        console.print(
-            f"[bold red]Unknown AI_PROVIDER='{provider}'. "
-            f"Choose 'anthropic' or 'openrouter'.[/bold red]"
-        )
+    try:
+        provider = get_provider()
+    except ValueError as e:
+        console.print(f"[bold red]Configuration Error: {e}[/bold red]")
         for finding in findings_list:
-            finding["ai_advice"] = "Skipped - invalid AI_PROVIDER"
+            finding["ai_advice"] = "Skipped - check configuration"
         return findings_list
 
+    comparison_mode = os.getenv("COMPARISON_MODE", "false").lower() == "true"
+
     # Show what we're using
-    if comparison_mode:
-        models = os.getenv("COMPARISON_MODELS", DEFAULT_MODEL)
-        judge = os.getenv("JUDGE_MODEL", "Unknown")
-        console.print(
-            Panel(
-                f"[bold magenta][ AI Comparison Mode Enabled ][/bold magenta]\n"
-                f"Contestants: [cyan]{models}[/cyan]\n"
-                f"Judge AI: [green]{judge}[/green]",
-                title="AI Advisor",
-                border_style="yellow",
-            )
+    console.print(
+        Panel(
+            f"Mode: [bold]{'Comparison' if comparison_mode else 'Standard'}[/bold]\n"
+            f"Provider: [cyan]{provider.get_name()}[/cyan]",
+            title="AI Advisor",
+            border_style="yellow",
         )
-    else:
-        model_name = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL) if provider == "openrouter" else "claude-3-haiku"
-        console.print(
-            Panel(
-                f"Provider: [bold]{provider}[/bold]\n  model: {model_name}",
-                title="AI Advisor",
-                border_style="yellow",
-            )
-        )
+    )
 
     total = len(findings_list)
     for i, finding in enumerate(findings_list):
@@ -290,7 +283,7 @@ def get_ai_advice(findings_list: list) -> list:
                 console.print(f"       [green][Winner: {finding['judge_info']['winning_model']}][/green]")
                 console.print(f"       [green][Confidence: {finding['judge_info']['confidence_score']}][/green]")
             else:
-                advice = call_fn(prompt)
+                advice = provider.complete(prompt, system_prompt=SYSTEM_PROMPT)
                 # Split by newline so JSON saves it as a readable list instead of one long string with \n
                 finding["ai_advice"] = [line.strip() for line in advice.split("\n") if line.strip()]
                 console.print("       [green][Advice Generated][/green]")

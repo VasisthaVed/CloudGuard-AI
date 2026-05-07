@@ -171,8 +171,83 @@ class TestReportOutput:
         assert data["total_findings"] == 1
         assert len(data["findings"]) == 1
 
+    def test_json_has_audit_metadata(self, tmp_path):
+        """New: report should include audit_metadata section."""
+        test_file = str(tmp_path / "test_meta_report.json")
+        findings = [
+            {"service": "S3", "resource_name": "b", "issue": "i",
+             "severity": "Critical", "details": "d", "ai_advice": "fix"},
+            {"service": "IAM", "resource_name": "u", "issue": "j",
+             "severity": "High", "details": "d", "ai_advice": "fix"},
+        ]
+        report.generate_report(findings, filename=test_file)
+
+        with open(test_file, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        assert "audit_metadata" in data
+        meta = data["audit_metadata"]
+        assert meta["overall_risk_score"] == 15  # 1 Critical(10) + 1 High(5)
+        assert meta["risk_level"] in ("LOW", "ELEVATED", "CRITICAL")
+        assert meta["severity_counts"]["Critical"] == 1
+        assert meta["severity_counts"]["High"] == 1
+
     def test_empty_findings_no_crash(self, tmp_path):
         test_file = str(tmp_path / "empty_report.json")
         # Should not crash, should just print a message
         report.generate_report([], filename=test_file)
         assert not os.path.exists(test_file), "Should not create file for empty findings"
+
+
+# -----------------------------------------------------------------------
+# Test 6: JSON extraction (Bug #1 fix)
+# -----------------------------------------------------------------------
+class TestJsonExtraction:
+    """_extract_json should handle various LLM output formats."""
+
+    def test_pure_json(self):
+        raw = '{"winning_model": "llama", "confidence_score": "High", "reasoning": "good", "best_advice": "do X"}'
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"] == "llama"
+        assert result["confidence_score"] == "High"
+
+    def test_json_in_markdown_fence(self):
+        raw = '''Here is my analysis:
+```json
+{"winning_model": "gemma", "confidence_score": "Medium", "reasoning": "ok", "best_advice": "do Y"}
+```
+Hope this helps!'''
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"] == "gemma"
+        assert result["confidence_score"] == "Medium"
+
+    def test_json_in_plain_fence(self):
+        raw = '''```
+{"winning_model": "mistral", "confidence_score": "Low", "reasoning": "weak", "best_advice": "do Z"}
+```'''
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"] == "mistral"
+
+    def test_json_buried_in_text(self):
+        raw = 'I have reviewed the advice. {"winning_model": "llama", "confidence_score": "High", "reasoning": "best", "best_advice": "fix it"} That is my verdict.'
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"] == "llama"
+
+    def test_invalid_json_returns_fallback(self):
+        raw = "This is not JSON at all, just some random text."
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"].startswith("Unknown")
+        assert "best_advice" in result
+
+    def test_empty_string_returns_fallback(self):
+        result = ai_advisor._extract_json("")
+        assert result["winning_model"].startswith("Unknown")
+
+    def test_none_returns_fallback(self):
+        result = ai_advisor._extract_json(None)
+        assert result["winning_model"].startswith("Unknown")
+
+    def test_nested_json(self):
+        raw = '{"winning_model": "llama", "confidence_score": "High", "reasoning": "good", "best_advice": "run: aws s3api put-bucket-encryption --bucket {\\"Bucket\\": \\"test\\"}"}'
+        result = ai_advisor._extract_json(raw)
+        assert result["winning_model"] == "llama"

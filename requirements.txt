@@ -1,6 +1,6 @@
 boto3
-anthropic
 rich
-openai
 python-dotenv
+requests
 pytest
+litellm==1.83.14
